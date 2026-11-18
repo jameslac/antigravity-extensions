@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Model &amp; Token Usage</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="topbar-row">
+        <div class="brand">
+          <svg class="brand-icon" width="18" height="18" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+            <rect x="14" y="14" width="100" height="100" rx="22" stroke="currentColor" stroke-width="9"/>
+            <path d="M38 88V62" stroke="currentColor" stroke-width="11" stroke-linecap="round"/>
+            <path d="M64 88V40" stroke="currentColor" stroke-width="11" stroke-linecap="round"/>
+            <path d="M90 88V52" stroke="currentColor" stroke-width="11" stroke-linecap="round"/>
+          </svg>
+          <h1 class="brand-title">Model &amp; Token Usage</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="live-pill" class="live-pill" title="Auto-refreshing">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="live-label">Live</span>
+          </span>
+          <button id="refresh-btn" type="button" class="icon-btn" title="Refresh now" aria-label="Refresh">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.35-3.6M13.5 2.5v2.75h-2.75"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <nav class="mode-tabs" role="tablist" aria-label="Dashboard views">
+        <button id="tab-overview" type="button" role="tab" class="mode-tab" data-mode="overview" aria-selected="true">
+          Models &amp; Quotas
+        </button>
+        <button id="tab-conversation" type="button" role="tab" class="mode-tab" data-mode="conversation" aria-selected="false">
+          Context &amp; Tokens
+        </button>
+      </nav>
+    </header>
+
+    <main class="content">
+      <div id="error-banner" class="error-banner hidden" role="alert"></div>
+
+      <!-- View 1: Model Usage & Quotas (Sidebar default) -->
+      <section id="view-overview" class="view-pane" aria-labelledby="tab-overview">
+        <div class="section-head">
+          <h2 class="section-title">Model Quotas</h2>
+          <span id="quota-updated" class="muted-text"></span>
+        </div>
+        <div id="quota-groups" class="quota-groups"></div>
+        <p id="quota-note" class="quota-note hidden"></p>
+
+        <div class="section-head with-controls">
+          <h2 class="section-title">Token Usage Summary</h2>
+          <div class="segmented" role="group" aria-label="Time range">
+            <button type="button" class="seg-btn active" data-range="all">All Time</button>
+            <button type="button" class="seg-btn" data-range="7d">7d</button>
+            <button type="button" class="seg-btn" data-range="24h">24h</button>
+          </div>
+        </div>
+        <div id="global-kpis" class="kpi-grid"></div>
+
+        <div class="section-head">
+          <h2 class="section-title">Usage by Model</h2>
+          <span id="model-usage-count" class="muted-text"></span>
+        </div>
+        <div id="model-usage-list" class="card stack-list"></div>
+
+        <div class="section-head with-controls">
+          <h2 class="section-title">Conversations</h2>
+          <div class="conv-controls">
+            <input id="conv-search" type="search" class="input sm" placeholder="Search conversations…" aria-label="Search conversations">
+            <select id="conv-sort" class="select sm" aria-label="Sort conversations">
+              <option value="recent">Most recent</option>
+              <option value="tokens">Most tokens</option>
+              <option value="context">Highest context %</option>
+            </select>
+          </div>
+        </div>
+        <div id="conversations-list" class="card stack-list"></div>
+
+        <details class="catalog-details">
+          <summary class="catalog-summary">
+            <span>Available Antigravity Models</span>
+            <span id="catalog-count" class="muted-text"></span>
+          </summary>
+          <div id="models-catalog" class="catalog-grid"></div>
+        </details>
+      </section>
+
+      <!-- View 2: Conversation Context & Token Inspector (Aux Pane default) -->
+      <section id="view-conversation" class="view-pane hidden" aria-labelledby="tab-conversation">
+        <div class="conv-header card">
+          <div class="conv-header-top">
+            <select id="conv-picker" class="select conv-picker" aria-label="Select conversation"></select>
+            <label id="pin-active-wrap" class="pin-toggle hidden" title="Automatically follow whichever conversation is open">
+              <input id="pin-active" type="checkbox" checked>
+              <span>Follow open chat</span>
+            </label>
+          </div>
+          <div id="conv-meta-row" class="conv-meta-row"></div>
+        </div>
+
+        <div id="conv-empty" class="card empty-state hidden">
+          <p class="empty-title">No conversation selected</p>
+          <p class="muted-text">Open a conversation or pick one above to inspect its live context window and token usage.</p>
+        </div>
+
+        <div id="conv-body" class="conv-body hidden">
+          <!-- Context Window Gauge -->
+          <div class="card context-card">
+            <div class="card-head">
+              <div>
+                <div class="card-label">Context Window</div>
+                <div id="ctx-headline" class="ctx-headline"></div>
+              </div>
+              <div id="ctx-pct-badge" class="pct-badge"></div>
+            </div>
+            <div id="ctx-bar" class="ctx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+            <div id="ctx-legend" class="ctx-legend"></div>
+            <div id="ctx-truncation" class="truncation-alert hidden"></div>
+            <div id="ctx-breakdown" class="breakdown-wrap"></div>
+          </div>
+
+          <!-- Cumulative KPI Grid (2x2) -->
+          <div id="conv-kpis" class="kpi-grid kpi-2x2"></div>
+
+          <!-- Models Used in Conversation -->
+          <div class="section-head">
+            <h2 class="section-title">Models in This Conversation</h2>
+          </div>
+          <div id="conv-models" class="card stack-list"></div>
+
+          <!-- Turn-by-Turn Chart & Timeline -->
+          <div class="section-head with-controls">
+            <h2 class="section-title">Turn-by-Turn Timeline</h2>
+            <button id="turn-order-btn" type="button" class="ghost-btn sm">Newest first</button>
+          </div>
+          <div id="turn-chart-card" class="card chart-card"></div>
+          <div id="turns-list" class="card stack-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

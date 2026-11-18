@@ -1,0 +1,26 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Model & Token Usage",
+  "description": "Live sidebar dashboard for Antigravity model quota and usage, plus conversation context window and token inspector in the auxiliary pane.",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "Model & Token Usage",
+    "views": [
+      {
+        "title": "Model Usage",
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_SIDEBAR"
+      },
+      {
+        "title": "Context & Tokens",
+        "path": "/conversation",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE"
+      }
+    ]
+  }
+}

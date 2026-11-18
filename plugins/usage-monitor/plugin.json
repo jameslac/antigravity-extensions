@@ -1,0 +1,21 @@
+{
+  "name": "usage-monitor",
+  "displayName": "Model & Token Usage",
+  "version": "1.0.0",
+  "description": "See Antigravity model quotas and usage right from the sidebar, and inspect live context window and token usage for each open conversation in the side pane.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "James Andre LaCour",
+    "url": "https://github.com/jameslac"
+  },
+  "homepage": "https://github.com/jameslac/antigravity-extensions/tree/main/plugins/usage-monitor",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jameslac/antigravity-extensions.git"
+  },
+  "suggestedPrompts": [
+    "Open the Context & Tokens panel for this conversation",
+    "Check my current Antigravity model quota and usage across models",
+    "Summarize the context window and token usage of my current conversation"
+  ]
+}
