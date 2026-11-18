@@ -8,6 +8,21 @@ A collection of plugins, UI sidecars, skills, and customizations for [Google Ant
 | :--- | :--- | :--- |
 | [`usage-monitor`](./plugins/usage-monitor) | **Model & Token Usage** | Live Antigravity model quota & usage dashboard in the sidebar (`Model Usage`), plus a per-conversation context window & token inspector in the auxiliary pane (`Context & Tokens`). |
 
+### Preview (`usage-monitor`)
+
+<table>
+  <tr>
+    <td valign="top" width="64%">
+      <strong>Models &amp; Quotas (Sidebar)</strong><br />
+      <img src="./plugins/usage-monitor/assets/models-quotas-preview.svg" alt="Models and Quotas Sidebar Preview" />
+    </td>
+    <td valign="top" width="36%">
+      <strong>Context &amp; Tokens (Aux Pane)</strong><br />
+      <img src="./plugins/usage-monitor/assets/context-tokens-preview.svg" alt="Conversation Context and Tokens Preview" />
+    </td>
+  </tr>
+</table>
+
 ---
 
 ## Quick Install
