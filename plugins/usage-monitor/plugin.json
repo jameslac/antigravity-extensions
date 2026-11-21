@@ -1,8 +1,8 @@
 {
   "name": "usage-monitor",
   "displayName": "Model & Token Usage",
-  "version": "1.0.0",
-  "description": "See Antigravity model quotas and usage right from the sidebar, and inspect live context window and token usage for each open conversation in the side pane.",
+  "version": "1.1.0",
+  "description": "See Antigravity model quotas, AI credits & cost analysis, and usage right from the sidebar, plus a customizable Simple view and live conversation context/token inspector in the side pane.",
   "logo": "assets/logo.svg",
   "author": {
     "name": "James Andre LaCour",

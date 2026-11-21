@@ -1,15 +1,69 @@
 (() => {
   const POLL_OVERVIEW_MS = 10_000;
   const POLL_CONV_MS = 2500;
+  const PREFS_KEY = 'usageMonitor.prefs.v1';
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
 
-  const initialMode =
+  const DEFAULT_PREFS = {
+    defaultToSimple: false,
+    creditPricePer1k: 10.0,
+    simpleWidgets: {
+      contextGauge: true,
+      tokenSummary: true,
+      quotas: true,
+      credits: true,
+      breakdown: false,
+      topModels: false,
+      recentChats: false,
+    },
+  };
+
+  function loadPrefs() {
+    try {
+      const raw = localStorage.getItem(PREFS_KEY);
+      if (!raw) return structuredClone(DEFAULT_PREFS);
+      const parsed = JSON.parse(raw);
+      return {
+        defaultToSimple: Boolean(parsed?.defaultToSimple),
+        creditPricePer1k:
+          Number.isFinite(Number(parsed?.creditPricePer1k)) && Number(parsed.creditPricePer1k) >= 0
+            ? Number(parsed.creditPricePer1k)
+            : DEFAULT_PREFS.creditPricePer1k,
+        simpleWidgets: {
+          ...DEFAULT_PREFS.simpleWidgets,
+          ...(parsed?.simpleWidgets || {}),
+        },
+      };
+    } catch {
+      return structuredClone(DEFAULT_PREFS);
+    }
+  }
+
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      // Ignore storage failures inside restricted iframes.
+    }
+  }
+
+  const prefs = loadPrefs();
+  const explicitView = params.get('view');
+  const defaultModeFromHost =
     location.pathname === '/conversation' ||
-    params.get('view') === 'aux' ||
+    explicitView === 'aux' ||
     Boolean(window.sidecar?.conversationId)
       ? 'conversation'
       : 'overview';
+  const initialMode =
+    explicitView === 'simple'
+      ? 'simple'
+      : explicitView === 'aux' || explicitView === 'overview'
+        ? defaultModeFromHost
+        : prefs.defaultToSimple
+          ? 'simple'
+          : defaultModeFromHost;
 
   const state = {
     mode: initialMode,
@@ -19,9 +73,11 @@
     selectedConvId: window.sidecar?.conversationId || params.get('conversationId') || '',
     pinActive: true,
     turnsNewestFirst: true,
+    customizeOpen: false,
     overview: null,
     convData: null,
     timer: null,
+    lastOverviewFetchMs: 0,
   };
 
   // ---------- theme sync ----------
@@ -44,7 +100,7 @@
     attributeFilter: ['style'],
   });
 
-  // ---------- formatting helpers ----------
+  // ---------- formatting & tooltip helpers ----------
   const esc = (s) =>
     String(s ?? '').replace(/[&<>"']/g, (c) => ({
       '&': '&amp;',
@@ -54,6 +110,9 @@
       "'": '&#39;',
     }[c]));
 
+  const infoTip = (text) =>
+    `<button type="button" class="info-btn" data-tip="${esc(text)}" aria-label="More info">i</button>`;
+
   function fmtTokens(n) {
     const v = Number(n) || 0;
     if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
@@ -62,9 +121,25 @@
     return String(Math.round(v));
   }
 
+  function fmtNum(n) {
+    return Math.round(Number(n) || 0).toLocaleString();
+  }
+
+  function fmtUsd(amount) {
+    const v = Number(amount) || 0;
+    if (v <= 0) return '$0.00';
+    if (v < 0.01) return `$${v.toFixed(4)}`;
+    if (v < 1) return `$${v.toFixed(3)}`;
+    return `$${v.toFixed(2)}`;
+  }
+
+  function creditsToUsd(credits) {
+    return ((Number(credits) || 0) / 1000) * (Number(prefs.creditPricePer1k) || 0);
+  }
+
   function fmtPct(frac) {
     const v = Math.max(0, Math.min(1, Number(frac) || 0));
-    return `${(v * 100).toFixed(v * 100 >= 10 || v === 0 ? 1 : 1)}%`;
+    return `${(v * 100).toFixed(1)}%`;
   }
 
   function fmtDurationMs(ms) {
@@ -127,6 +202,72 @@
     return '<span class="pill">Idle</span>';
   }
 
+  // ---------- viewport-clamped floating tooltip ----------
+  function initTooltips() {
+    const tipEl = $('floating-tooltip');
+    let activeTrigger = null;
+
+    function showTip(trigger) {
+      const text = trigger?.dataset?.tip;
+      if (!text) return;
+      activeTrigger = trigger;
+      tipEl.textContent = text;
+      tipEl.classList.remove('hidden');
+
+      const pad = 8;
+      const rect = trigger.getBoundingClientRect();
+      const tipRect = tipEl.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      let left = rect.left + rect.width / 2 - tipRect.width / 2;
+      left = Math.max(pad, Math.min(vw - tipRect.width - pad, left));
+
+      let top = rect.bottom + 6;
+      if (top + tipRect.height + pad > vh && rect.top - tipRect.height - 6 >= pad) {
+        top = rect.top - tipRect.height - 6;
+      }
+      top = Math.max(pad, Math.min(vh - tipRect.height - pad, top));
+
+      tipEl.style.left = `${Math.round(left)}px`;
+      tipEl.style.top = `${Math.round(top)}px`;
+    }
+
+    function hideTip() {
+      activeTrigger = null;
+      tipEl.classList.add('hidden');
+    }
+
+    document.addEventListener('mouseover', (e) => {
+      const btn = e.target.closest?.('.info-btn');
+      if (btn) showTip(btn);
+    });
+    document.addEventListener('mouseout', (e) => {
+      const btn = e.target.closest?.('.info-btn');
+      if (btn && btn === activeTrigger) hideTip();
+    });
+    document.addEventListener('focusin', (e) => {
+      const btn = e.target.closest?.('.info-btn');
+      if (btn) showTip(btn);
+    });
+    document.addEventListener('focusout', (e) => {
+      const btn = e.target.closest?.('.info-btn');
+      if (btn) hideTip();
+    });
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest?.('.info-btn');
+      if (btn) {
+        e.preventDefault();
+        if (activeTrigger === btn && !tipEl.classList.contains('hidden')) hideTip();
+        else showTip(btn);
+      } else if (activeTrigger) {
+        hideTip();
+      }
+    });
+    window.addEventListener('scroll', hideTip, true);
+  }
+  initTooltips();
+
   // ---------- network ----------
   async function getJson(path) {
     const f = window.sidecar?.fetch ? window.sidecar.fetch.bind(window.sidecar) : fetch;
@@ -152,7 +293,41 @@
     $('live-label').textContent = ok ? 'Live' : 'Reconnecting';
   }
 
-  // ---------- renderers: Overview ----------
+  // ---------- shared HTML builders ----------
+  function renderQuotaLegendHtml() {
+    return `
+      <div class="legend-bar" aria-label="Quota color legend">
+        <span class="legend-item"><span class="swatch good"></span>Healthy (&gt;50%)</span>
+        <span class="legend-item"><span class="swatch warn"></span>Getting low (20–50%)</span>
+        <span class="legend-item"><span class="swatch danger"></span>Nearly empty (≤20%)</span>
+      </div>
+    `;
+  }
+
+  function renderTokenLegendHtml({ includeOutput = true, includeRemaining = false } = {}) {
+    return `
+      <div class="legend-bar" aria-label="Token color legend">
+        <span class="legend-item">
+          <span class="swatch seg-cache"></span>Cached Context
+          ${infoTip('Previously seen prompt/conversation prefix reused from prompt cache (cheaper & faster than new input).')}
+        </span>
+        <span class="legend-item">
+          <span class="swatch seg-input"></span>New Input
+          ${infoTip('Uncached tokens newly processed in each turn (new user messages, tool results, and read files).')}
+        </span>
+        ${includeOutput ? `
+          <span class="legend-item">
+            <span class="swatch seg-output"></span>Output
+            ${infoTip('Tokens generated by the model (includes both hidden thinking/reasoning tokens and visible responses).')}
+          </span>
+        ` : ''}
+        ${includeRemaining ? `
+          <span class="legend-item"><span class="swatch" style="background:var(--surface-2);border:1px solid var(--line)"></span>Free Window</span>
+        ` : ''}
+      </div>
+    `;
+  }
+
   function renderBucketRow(b) {
     const frac = b.remainingFraction;
     const tone = quotaTone(frac);
@@ -178,7 +353,177 @@
     `;
   }
 
+  function renderBreakdownHtml(conv) {
+    const tb = conv?.tokenBreakdown;
+    if (!tb || !tb.groups?.length) return '';
+    const denom = Math.max(1, tb.totalTokens || conv.contextTokensUsed);
+    return `
+      <div class="breakdown-wrap">
+        <div class="card-label">
+          <span>Context Breakdown</span>
+          ${infoTip('Shows what fills the current prompt window: System instructions, Tool schemas, and Chat messages/tool outputs.')}
+        </div>
+        ${tb.groups
+          .map((g) => {
+            const pct = ((g.numTokens / denom) * 100).toFixed(1);
+            const children = [...(g.children || [])].sort((a, b) => b.numTokens - a.numTokens);
+            return `
+              <details class="breakdown-group">
+                <summary>
+                  <span>${esc(g.name)}</span>
+                  <span class="muted-text"><strong>${esc(fmtTokens(g.numTokens))}</strong> (${pct}%)</span>
+                </summary>
+                ${children.length ? `
+                  <div class="breakdown-children">
+                    ${children.slice(0, 40).map((ch) => `
+                      <div class="breakdown-child">
+                        <span class="breakdown-child-name" title="${esc(ch.name)}">${esc(ch.name)}</span>
+                        <span>${esc(fmtTokens(ch.numTokens))}</span>
+                      </div>
+                    `).join('')}
+                  </div>
+                ` : ''}
+              </details>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
+  }
+
+  function renderContextGaugeHtml(conv, { showBreakdown = true } = {}) {
+    if (!conv) return '';
+    const maxCtx = Math.max(1, conv.maxContextTokens || 1_000_000);
+    const usedCtx = conv.contextTokensUsed || 0;
+    const utilFrac = Math.min(1, usedCtx / maxCtx);
+    const utilPct = utilFrac * 100;
+    const remaining = Math.max(0, maxCtx - usedCtx);
+
+    const latestTotal = conv.latestCacheReadTokens + conv.latestUncachedInputTokens;
+    const cacheShare = latestTotal > 0 ? (conv.latestCacheReadTokens / latestTotal) * utilPct : utilPct;
+    const inputShare = Math.max(0, utilPct - cacheShare);
+
+    let compClass = 'good';
+    let compMsg = `${fmtTokens(remaining)} free before max context — plenty of room.`;
+    if (utilFrac >= 0.85) {
+      compClass = 'danger';
+      compMsg = `Near limit (${fmtTokens(remaining)} left) — good time to spin up a new conversation before compaction.`;
+    } else if (utilFrac >= 0.65) {
+      compClass = 'warn';
+      compMsg = `Filling up (${fmtTokens(remaining)} left) — consider starting a fresh chat soon for best recall.`;
+    }
+
+    return `
+      <div class="card-head">
+        <div>
+          <div class="card-label">
+            <span>Context Window</span>
+            ${infoTip('Current prompt size sent to the model on the latest turn out of the maximum context window before automatic compaction.')}
+          </div>
+          <div class="ctx-headline">${esc(fmtTokens(usedCtx))} / ${esc(fmtTokens(maxCtx))} tokens</div>
+        </div>
+        <div class="pct-badge ${utilPct > 85 ? 'danger' : utilPct > 65 ? 'warn' : ''}">${utilPct.toFixed(1)}%</div>
+      </div>
+      <div class="ctx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${utilPct.toFixed(0)}">
+        <div class="seg-cache" style="width:${cacheShare}%"></div>
+        <div class="seg-input" style="width:${inputShare}%"></div>
+      </div>
+      <div class="ctx-legend">
+        <span class="legend-item"><span class="swatch seg-cache"></span>Cached: <strong>${esc(fmtTokens(conv.latestCacheReadTokens))}</strong></span>
+        <span class="legend-item"><span class="swatch seg-input"></span>New Input: <strong>${esc(fmtTokens(conv.latestUncachedInputTokens))}</strong></span>
+        <span class="legend-item">Remaining: <strong>${esc(fmtTokens(remaining))}</strong></span>
+      </div>
+      <div class="compaction-status ${compClass}">${esc(compMsg)}</div>
+      ${conv.truncationReason ? `<div class="truncation-alert">Context compacted (${esc(conv.truncationReason.replace(/^TRUNCATION_REASON_/, ''))})</div>` : ''}
+      ${showBreakdown ? renderBreakdownHtml(conv) : ''}
+    `;
+  }
+
+  function renderCreditsAnalysisHtml({
+    creditsStatus,
+    creditsUsed = 0,
+    creditBilledTurns = 0,
+    quotaCoveredTurns = 0,
+    estApiCostUsd = 0,
+    estCacheSavingsUsd = 0,
+    scopeLabel = 'Scope',
+    rateInputId = '',
+  }) {
+    const avail = creditsStatus?.totalAvailableCredits || 0;
+    const planName = creditsStatus?.planName || 'Antigravity';
+    const spentUsd = creditsToUsd(creditsUsed);
+    const availUsd = creditsToUsd(avail);
+    const totalTurns = creditBilledTurns + quotaCoveredTurns;
+    const minReq = creditsStatus?.availableCredits?.[0]?.minimumCreditAmountForUsage || 0;
+
+    return `
+      <div class="credits-top">
+        <div class="head-with-tip">
+          <span class="pill accent">${esc(planName)}</span>
+          ${creditsUsed > 0
+            ? `<span class="pill credit">⚡ ${esc(fmtNum(creditsUsed))} credits spent</span>`
+            : `<span class="pill good">100% Quota-covered</span>`}
+        </div>
+        <span class="muted-text">${esc(`${creditBilledTurns}/${totalTurns} turns billed credits`)}</span>
+      </div>
+      <div class="credits-grid">
+        <div class="credit-stat">
+          <div class="credit-stat-label">
+            <span>Available AI Credits</span>
+            ${infoTip('Your remaining Google AI credit pool (used automatically when a model quota hits its limit or when AI credits are enabled).')}
+          </div>
+          <div class="credit-stat-value">${esc(fmtNum(avail))} cr</div>
+          <div class="credit-stat-sub">Est. value: <span class="credit-usd-val" data-credits="${avail}">${esc(fmtUsd(availUsd))}</span>${minReq ? ` · Min ${minReq}` : ''}</div>
+        </div>
+        <div class="credit-stat">
+          <div class="credit-stat-label">
+            <span>Credits Spent (${esc(scopeLabel)})</span>
+            ${infoTip('Actual GOOGLE_ONE_AI credits deducted on turns in this scope. Turns covered by your plan quota show 0 credits.')}
+          </div>
+          <div class="credit-stat-value">${esc(fmtNum(creditsUsed))} cr</div>
+          <div class="credit-stat-sub">Est. value: <span class="credit-usd-val" data-credits="${creditsUsed}">${esc(fmtUsd(spentUsd))}</span></div>
+        </div>
+        <div class="credit-stat">
+          <div class="credit-stat-label">
+            <span>Est. API Equivalent</span>
+            ${infoTip('What the exact same uncached input, cached read, and output tokens would cost on pay-as-you-go LLM API pricing (approximate reference rates).')}
+          </div>
+          <div class="credit-stat-value">${esc(fmtUsd(estApiCostUsd))}</div>
+          <div class="credit-stat-sub">Cache saved ~${esc(fmtUsd(estCacheSavingsUsd))}</div>
+        </div>
+      </div>
+      <div class="credits-footer">
+        <span>${esc(`${quotaCoveredTurns} quota turns · ${creditBilledTurns} credit turns`)}</span>
+        ${rateInputId ? `
+          <label class="rate-control" title="Used to convert AI credits into dollar value (Google AI Pro top-up reference is ~$10 per 1,000 credits)">
+            <span>$ / 1K credits:</span>
+            <input id="${esc(rateInputId)}" type="number" step="0.5" min="0" class="input sm rate-input" value="${esc(prefs.creditPricePer1k)}">
+          </label>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function wireRateInput(inputId) {
+    const el = $(inputId);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const val = Number(el.value);
+      if (!Number.isFinite(val) || val < 0) return;
+      prefs.creditPricePer1k = val;
+      savePrefs();
+      document.querySelectorAll('.rate-input').forEach((other) => {
+        if (other !== el) other.value = String(val);
+      });
+      document.querySelectorAll('.credit-usd-val[data-credits]').forEach((span) => {
+        span.textContent = fmtUsd(creditsToUsd(Number(span.dataset.credits || 0)));
+      });
+    });
+  }
+
+  // ---------- renderers: Overview ----------
   function renderQuotas(quota) {
+    $('quota-legend').innerHTML = renderQuotaLegendHtml();
     const groupsEl = $('quota-groups');
     const noteEl = $('quota-note');
     const groups = quota?.groups || [];
@@ -231,22 +576,22 @@
     const cachePct = fmtPct(g.cacheHitRate);
     $('global-kpis').innerHTML = `
       <div class="kpi-card">
-        <div class="kpi-label">Total Tokens</div>
+        <div class="kpi-label"><span>Total Tokens</span>${infoTip('Sum of uncached input, cached prefix read, and output tokens across all turns in this window.')}</div>
         <div class="kpi-value">${esc(fmtTokens(g.totalTokens))}</div>
         <div class="kpi-sub">${esc(`${g.turnCount} turns · ${g.conversationCount} chats`)}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Uncached Input</div>
+        <div class="kpi-label"><span>Uncached Input</span>${infoTip('Fresh prompt tokens processed without hitting the prompt cache.')}</div>
         <div class="kpi-value">${esc(fmtTokens(g.totalInputTokens))}</div>
         <div class="kpi-sub">${esc(`Cache read: ${fmtTokens(g.totalCacheReadTokens)}`)}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Cache Hit Rate</div>
+        <div class="kpi-label"><span>Cache Hit Rate</span>${infoTip('Percentage of all prompt input tokens served from prompt cache rather than re-billed at full uncached cost.')}</div>
         <div class="kpi-value">${esc(cachePct)}</div>
         <div class="kpi-sub">${esc(`${fmtTokens(g.totalCacheReadTokens)} cached`)}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Output Tokens</div>
+        <div class="kpi-label"><span>Output Tokens</span>${infoTip('All tokens generated by models: internal thinking/reasoning tokens plus visible reply & tool-call tokens.')}</div>
         <div class="kpi-value">${esc(fmtTokens(g.totalOutputTokens))}</div>
         <div class="kpi-sub">${esc(`Think: ${fmtTokens(g.totalThinkingTokens)} · Resp: ${fmtTokens(g.totalResponseTokens)}`)}</div>
       </div>
@@ -254,6 +599,7 @@
   }
 
   function renderModelUsage(models, globalTotalTokens) {
+    $('model-token-legend').innerHTML = renderTokenLegendHtml({ includeOutput: true });
     const el = $('model-usage-list');
     $('model-usage-count').textContent = `${models.length} used`;
     if (!models.length) {
@@ -272,16 +618,20 @@
         const qBadge = typeof qFrac === 'number'
           ? `<span class="pill ${quotaTone(qFrac)}">${esc((qFrac * 100).toFixed(0))}% quota</span>`
           : '';
+        const crBadge = m.creditsUsed > 0
+          ? `<span class="pill credit">⚡ ${esc(fmtNum(m.creditsUsed))} cr</span>`
+          : '';
         return `
           <div class="list-row">
             <div class="row-top">
               <span class="row-title">${esc(m.displayName)}</span>
               <div class="conv-actions">
+                ${crBadge}
                 ${qBadge}
                 <span class="pill accent">${esc(fmtTokens(m.totalTokens))} (${esc(fmtPct(share))})</span>
               </div>
             </div>
-            <div class="stacked-bar" title="Cache Read / Uncached Input / Output">
+            <div class="stacked-bar" title="Cached Context / New Input / Output">
               <div class="seg-cache" style="width:${cacheW}%"></div>
               <div class="seg-input" style="width:${inputW}%"></div>
               <div class="seg-output" style="width:${outW}%"></div>
@@ -292,7 +642,7 @@
               <span>In <strong>${esc(fmtTokens(m.inputTokens))}</strong></span>
               <span>Cache <strong>${esc(fmtTokens(m.cacheReadTokens))}</strong> (${esc(fmtPct(m.cacheHitRate))})</span>
               <span>Out <strong>${esc(fmtTokens(m.outputTokens))}</strong></span>
-              ${m.thinkingTokens > 0 ? `<span>Think <strong>${esc(fmtTokens(m.thinkingTokens))}</strong></span>` : ''}
+              <span>Est. API <strong>${esc(fmtUsd(m.estApiCostUsd))}</strong></span>
             </div>
           </div>
         `;
@@ -336,6 +686,7 @@
             <div class="row-top">
               <span class="row-title" title="${esc(c.title)}">${esc(c.title)}</span>
               <div class="conv-actions">
+                ${c.totalCreditsUsed > 0 ? `<span class="pill credit">⚡ ${esc(fmtNum(c.totalCreditsUsed))} cr</span>` : ''}
                 ${statusBadge(c.status)}
                 <button type="button" class="action-link" data-inspect-conv="${esc(c.conversationId)}">Inspect</button>
                 ${canToggleConv ? `<button type="button" class="action-link" data-open-conv="${esc(c.conversationId)}">Open</button>` : ''}
@@ -346,9 +697,10 @@
               ${c.workspaceName ? `<span>${esc(c.workspaceName)}</span>` : ''}
               <span>Total <strong>${esc(fmtTokens(c.totalTokens))}</strong></span>
               <span>Ctx <strong>${esc(fmtTokens(c.contextTokensUsed))}</strong> / ${esc(fmtTokens(c.maxContextTokens))} (${ctxPct.toFixed(0)}%)</span>
+              <span>API ~<strong>${esc(fmtUsd(c.estApiCostUsd))}</strong></span>
               <span>${esc(fmtRelativeTime(c.lastModifiedMs))}</span>
             </div>
-            <div class="bar-track" title="Context window usage">
+            <div class="bar-track" title="Context window fullness">
               <div class="bar-fill ${ctxTone}" style="width:${ctxPct}%"></div>
             </div>
           </div>
@@ -403,46 +755,27 @@
     $('quota-updated').textContent = `Updated ${fmtRelativeTime(data.generatedAt)}`;
     renderQuotas(data.quota);
     renderGlobalKpis(data.globalTotals);
-    renderModelUsage(data.modelUsage || [], data.globalTotals?.totalTokens || 0);
+
+    const g = data.globalTotals || {};
+    const scopeLabel = state.range === '24h' ? '24h' : state.range === '7d' ? '7d' : 'All Time';
+    $('overview-credits-card').innerHTML = renderCreditsAnalysisHtml({
+      creditsStatus: data.creditsStatus,
+      creditsUsed: g.totalCreditsUsed || 0,
+      creditBilledTurns: g.creditBilledTurns || 0,
+      quotaCoveredTurns: g.quotaCoveredTurns || 0,
+      estApiCostUsd: g.estApiCostUsd || 0,
+      estCacheSavingsUsd: g.estCacheSavingsUsd || 0,
+      scopeLabel,
+      rateInputId: 'credit-rate-input-overview',
+    });
+    wireRateInput('credit-rate-input-overview');
+
+    renderModelUsage(data.modelUsage || [], g.totalTokens || 0);
     renderConversationsList(data.conversations || []);
     renderModelsCatalog(data.modelsCatalog || []);
   }
 
   // ---------- renderers: Conversation Inspector ----------
-  function renderTokenBreakdown(conv) {
-    const el = $('ctx-breakdown');
-    const tb = conv.tokenBreakdown;
-    if (!tb || !tb.groups?.length) {
-      el.innerHTML = '';
-      return;
-    }
-    const denom = Math.max(1, tb.totalTokens || conv.contextTokensUsed);
-    el.innerHTML = tb.groups
-      .map((g) => {
-        const pct = ((g.numTokens / denom) * 100).toFixed(1);
-        const children = [...(g.children || [])].sort((a, b) => b.numTokens - a.numTokens);
-        return `
-          <details class="breakdown-group">
-            <summary>
-              <span>${esc(g.name)}</span>
-              <span class="muted-text"><strong>${esc(fmtTokens(g.numTokens))}</strong> (${pct}%)</span>
-            </summary>
-            ${children.length ? `
-              <div class="breakdown-children">
-                ${children.slice(0, 40).map((ch) => `
-                  <div class="breakdown-child">
-                    <span class="breakdown-child-name" title="${esc(ch.name)}">${esc(ch.name)}</span>
-                    <span>${esc(fmtTokens(ch.numTokens))}</span>
-                  </div>
-                `).join('')}
-              </div>
-            ` : ''}
-          </details>
-        `;
-      })
-      .join('');
-  }
-
   function renderTurnChart(turns) {
     const el = $('turn-chart-card');
     if (!turns.length) {
@@ -452,12 +785,14 @@
     const slice = turns.slice(-48);
     const maxCtx = Math.max(1, ...slice.map((t) => t.contextTokens + t.outputTokens));
     el.innerHTML = `
+      ${renderTokenLegendHtml({ includeOutput: true })}
       <div class="chart-bars" role="img" aria-label="Token usage per turn">
         ${slice.map((t) => {
           const cacheH = Math.max(1, Math.round((t.cacheReadTokens / maxCtx) * 70));
           const inH = Math.max(t.inputTokens > 0 ? 2 : 0, Math.round((t.inputTokens / maxCtx) * 70));
           const outH = Math.max(t.outputTokens > 0 ? 2 : 0, Math.round((t.outputTokens / maxCtx) * 70));
-          const tip = `Turn ${t.turnNumber} (${t.modelDisplayName}): Context ${fmtTokens(t.contextTokens)} | New In ${fmtTokens(t.inputTokens)} | Cache ${fmtTokens(t.cacheReadTokens)} | Out ${fmtTokens(t.outputTokens)}`;
+          const crPart = t.creditsUsed > 0 ? ` | Credits: ${t.creditsUsed}` : '';
+          const tip = `Turn ${t.turnNumber} (${t.modelDisplayName}): Context ${fmtTokens(t.contextTokens)} | New In ${fmtTokens(t.inputTokens)} | Cache ${fmtTokens(t.cacheReadTokens)} | Out ${fmtTokens(t.outputTokens)}${crPart}`;
           return `
             <div class="chart-col" title="${esc(tip)}">
               ${outH ? `<div class="chart-col-fill seg-output" style="height:${outH}px"></div>` : ''}
@@ -469,117 +804,104 @@
       </div>
       <div class="chart-caption">
         <span>Turn ${slice[0].turnNumber} → Turn ${slice[slice.length - 1].turnNumber}</span>
-        <span>Peak: ${esc(fmtTokens(maxCtx))}</span>
+        <span>Peak prompt: ${esc(fmtTokens(maxCtx))}</span>
       </div>
     `;
+  }
+
+  function syncConversationPicker(pickerEl, pinWrapEl, pinCheckEl, payload) {
+    const list = payload?.conversations || [];
+    pickerEl.innerHTML = list.length
+      ? list.map((c) => `<option value="${esc(c.conversationId)}">${esc(c.title)}</option>`).join('')
+      : '<option value="">No conversations found</option>';
+    if (payload?.conversationId) pickerEl.value = payload.conversationId;
+
+    if (window.sidecar?.conversationId) {
+      pinWrapEl.classList.remove('hidden');
+      pinCheckEl.checked = state.pinActive;
+    } else {
+      pinWrapEl.classList.add('hidden');
+    }
+  }
+
+  function renderConvMetaRow(metaEl, conv, openBtnId) {
+    if (!conv) {
+      metaEl.innerHTML = '';
+      return;
+    }
+    const canOpenChat = Boolean(window.sidecar?.ui?.toggleConversation);
+    metaEl.innerHTML = `
+      ${statusBadge(conv.status)}
+      <span class="pill accent">${esc(conv.primaryModel)}</span>
+      ${conv.workspaceName ? `<span class="pill">${esc(conv.workspaceName)}</span>` : ''}
+      <span class="pill">${esc(`${conv.turnCount} turns · ${conv.stepCount} steps`)}</span>
+      ${conv.totalCreditsUsed > 0 ? `<span class="pill credit">⚡ ${esc(fmtNum(conv.totalCreditsUsed))} cr</span>` : ''}
+      ${canOpenChat && conv.conversationId !== window.sidecar?.conversationId
+        ? `<button type="button" id="${esc(openBtnId)}" class="action-link">Open Chat</button>`
+        : ''}
+    `;
+    const openBtn = $(openBtnId);
+    if (openBtn) {
+      openBtn.addEventListener('click', () => window.sidecar.ui.toggleConversation(conv.conversationId));
+    }
   }
 
   function renderConversation() {
     const payload = state.convData;
     if (!payload) return;
 
-    // Populate conversation picker
-    const picker = $('conv-picker');
-    const list = payload.conversations || [];
-    picker.innerHTML = list.length
-      ? list
-          .map((c) => `<option value="${esc(c.conversationId)}">${esc(c.title)}</option>`)
-          .join('')
-      : '<option value="">No conversations found</option>';
-    if (payload.conversationId) picker.value = payload.conversationId;
-
-    const pinWrap = $('pin-active-wrap');
-    if (window.sidecar?.conversationId) {
-      pinWrap.classList.remove('hidden');
-      $('pin-active').checked = state.pinActive;
-    } else {
-      pinWrap.classList.add('hidden');
-    }
+    syncConversationPicker($('conv-picker'), $('pin-active-wrap'), $('pin-active'), payload);
 
     const conv = payload.conversation;
+    renderConvMetaRow($('conv-meta-row'), conv, 'open-selected-conv');
+
     if (!conv) {
       $('conv-empty').classList.remove('hidden');
       $('conv-body').classList.add('hidden');
-      $('conv-meta-row').innerHTML = '';
       return;
     }
 
     $('conv-empty').classList.add('hidden');
     $('conv-body').classList.remove('hidden');
 
-    const canOpenChat = Boolean(window.sidecar?.ui?.toggleConversation);
-    $('conv-meta-row').innerHTML = `
-      ${statusBadge(conv.status)}
-      <span class="pill accent">${esc(conv.primaryModel)}</span>
-      ${conv.workspaceName ? `<span class="pill">${esc(conv.workspaceName)}</span>` : ''}
-      <span class="pill">${esc(`${conv.turnCount} turns · ${conv.stepCount} steps`)}</span>
-      ${canOpenChat && conv.conversationId !== window.sidecar?.conversationId
-        ? `<button type="button" id="open-selected-conv" class="action-link">Open Chat</button>`
-        : ''}
-    `;
-    const openBtn = $('open-selected-conv');
-    if (openBtn) {
-      openBtn.addEventListener('click', () => window.sidecar.ui.toggleConversation(conv.conversationId));
-    }
-
-    // Context Window Gauge
-    const maxCtx = Math.max(1, conv.maxContextTokens || 1_000_000);
-    const usedCtx = conv.contextTokensUsed || 0;
-    const utilPct = Math.min(100, (usedCtx / maxCtx) * 100);
-    $('ctx-headline').textContent = `${fmtTokens(usedCtx)} / ${fmtTokens(maxCtx)} tokens`;
-    const badge = $('ctx-pct-badge');
-    badge.textContent = `${utilPct.toFixed(1)}%`;
-    badge.className = `pct-badge ${utilPct > 85 ? 'danger' : utilPct > 65 ? 'warn' : ''}`;
-
-    const latestTotal = conv.latestCacheReadTokens + conv.latestUncachedInputTokens;
-    const cacheShare = latestTotal > 0 ? (conv.latestCacheReadTokens / latestTotal) * utilPct : utilPct;
-    const inputShare = Math.max(0, utilPct - cacheShare);
-    const ctxBar = $('ctx-bar');
-    ctxBar.setAttribute('aria-valuenow', utilPct.toFixed(0));
-    ctxBar.innerHTML = `
-      <div class="seg-cache" style="width:${cacheShare}%"></div>
-      <div class="seg-input" style="width:${inputShare}%"></div>
-    `;
-
-    $('ctx-legend').innerHTML = `
-      <span class="legend-item"><span class="swatch seg-cache"></span>Cached: <strong>${esc(fmtTokens(conv.latestCacheReadTokens))}</strong></span>
-      <span class="legend-item"><span class="swatch seg-input"></span>New Input: <strong>${esc(fmtTokens(conv.latestUncachedInputTokens))}</strong></span>
-      <span class="legend-item">Remaining: <strong>${esc(fmtTokens(Math.max(0, maxCtx - usedCtx)))}</strong></span>
-    `;
-
-    const truncEl = $('ctx-truncation');
-    if (conv.truncationReason) {
-      truncEl.textContent = `Context compacted (${conv.truncationReason.replace(/^TRUNCATION_REASON_/, '')})`;
-      truncEl.classList.remove('hidden');
-    } else {
-      truncEl.classList.add('hidden');
-    }
-
-    renderTokenBreakdown(conv);
+    $('conv-context-card').innerHTML = renderContextGaugeHtml(conv, { showBreakdown: true });
 
     // Cumulative KPIs (2x2)
     $('conv-kpis').innerHTML = `
       <div class="kpi-card">
-        <div class="kpi-label">Total Tokens</div>
+        <div class="kpi-label"><span>Total Tokens</span>${infoTip('Total tokens processed across every turn in this conversation (each turn re-sends context + new input + output).')}</div>
         <div class="kpi-value">${esc(fmtTokens(conv.totalTokens))}</div>
         <div class="kpi-sub">${esc(`Uncached In: ${fmtTokens(conv.totalInputTokens)}`)}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Cache Hit Rate</div>
+        <div class="kpi-label"><span>Cache Hit Rate</span>${infoTip('Share of prompt input tokens served from prompt cache instead of being billed as fresh uncached input.')}</div>
         <div class="kpi-value">${esc(fmtPct(conv.cacheHitRate))}</div>
         <div class="kpi-sub">${esc(`Read: ${fmtTokens(conv.totalCacheReadTokens)}${conv.totalCacheWriteTokens ? ` · Write: ${fmtTokens(conv.totalCacheWriteTokens)}` : ''}`)}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Output Tokens</div>
+        <div class="kpi-label"><span>Output Tokens</span>${infoTip('Combined tokens generated by the model: internal Thinking reasoning tokens plus visible Response text/tool calls.')}</div>
         <div class="kpi-value">${esc(fmtTokens(conv.totalOutputTokens))}</div>
-        <div class="kpi-sub">${esc(`Think: ${fmtTokens(conv.totalThinkingTokens)} · Resp: ${esc(fmtTokens(conv.totalResponseTokens))}`)}</div>
+        <div class="kpi-sub">${esc(`Think: ${fmtTokens(conv.totalThinkingTokens)} · Resp: ${fmtTokens(conv.totalResponseTokens)}`)}</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Avg TTFT &amp; Stream</div>
+        <div class="kpi-label"><span>Avg TTFT &amp; Stream</span>${infoTip('TTFT = Time to First Token (model latency before streaming begins). Stream = total generation duration across turns.')}</div>
         <div class="kpi-value">${esc(fmtDurationMs(conv.avgTtftMs))}</div>
         <div class="kpi-sub">${esc(`Stream: ${fmtDurationMs(conv.totalStreamingMs)}${conv.totalRetries ? ` · ${conv.totalRetries} retries` : ''}`)}</div>
       </div>
     `;
+
+    // Conversation AI Credits & Cost Analysis
+    $('conv-credits-card').innerHTML = renderCreditsAnalysisHtml({
+      creditsStatus: payload.creditsStatus,
+      creditsUsed: conv.totalCreditsUsed || 0,
+      creditBilledTurns: conv.creditBilledTurns || 0,
+      quotaCoveredTurns: conv.quotaCoveredTurns || 0,
+      estApiCostUsd: conv.estApiCostUsd || 0,
+      estCacheSavingsUsd: conv.estCacheSavingsUsd || 0,
+      scopeLabel: 'This Chat',
+      rateInputId: 'credit-rate-input-conv',
+    });
+    wireRateInput('credit-rate-input-conv');
 
     // Models used in conversation
     const modelsEl = $('conv-models');
@@ -593,14 +915,17 @@
           <div class="list-row">
             <div class="row-top">
               <span class="row-title">${esc(m.displayName)}</span>
-              <span class="pill accent">${esc(fmtTokens(m.totalTokens))} (${esc(fmtPct(m.totalTokens / denom))})</span>
+              <div class="conv-actions">
+                ${m.creditsUsed > 0 ? `<span class="pill credit">⚡ ${esc(fmtNum(m.creditsUsed))} cr</span>` : ''}
+                <span class="pill accent">${esc(fmtTokens(m.totalTokens))} (${esc(fmtPct(m.totalTokens / denom))})</span>
+              </div>
             </div>
             <div class="row-metrics">
               <span><strong>${esc(m.turns)}</strong> turns</span>
               <span>In <strong>${esc(fmtTokens(m.inputTokens))}</strong></span>
               <span>Cache <strong>${esc(fmtTokens(m.cacheReadTokens))}</strong></span>
               <span>Out <strong>${esc(fmtTokens(m.outputTokens))}</strong></span>
-              ${m.thinkingTokens > 0 ? `<span>Think <strong>${esc(fmtTokens(m.thinkingTokens))}</strong></span>` : ''}
+              <span>Est. API <strong>${esc(fmtUsd(m.estApiCostUsd))}</strong></span>
             </div>
           </div>
         `)
@@ -620,7 +945,12 @@
           <div class="list-row">
             <div class="row-top">
               <span class="row-title">Turn ${t.turnNumber} · ${esc(t.modelDisplayName)}</span>
-              <span class="muted-text" title="${esc(fmtExactTime(t.timestamp))}">${esc(fmtRelativeTime(t.timestamp))}</span>
+              <div class="conv-actions">
+                ${t.creditsUsed > 0
+                  ? `<span class="pill credit">⚡ ${esc(t.creditsUsed)} cr</span>`
+                  : '<span class="pill">Quota</span>'}
+                <span class="muted-text" title="${esc(fmtExactTime(t.timestamp))}">${esc(fmtRelativeTime(t.timestamp))}</span>
+              </div>
             </div>
             <div class="row-metrics">
               <span>Ctx <strong>${esc(fmtTokens(t.contextTokens))}</strong></span>
@@ -628,6 +958,7 @@
               <span>Cache <strong>${esc(fmtTokens(t.cacheReadTokens))}</strong></span>
               <span>Out <strong>${esc(fmtTokens(t.outputTokens))}</strong>${t.thinkingTokens ? ` (${esc(fmtTokens(t.thinkingTokens))} think)` : ''}</span>
               ${t.ttftMs ? `<span>TTFT <strong>${esc(fmtDurationMs(t.ttftMs))}</strong></span>` : ''}
+              <span>~<strong>${esc(fmtUsd(t.estApiCostUsd))}</strong></span>
             </div>
             ${t.tools?.length ? `
               <div class="turn-tools">
@@ -640,6 +971,183 @@
     }
   }
 
+  // ---------- renderers: Simple Customizable View ----------
+  function syncCustomizePanelInputs() {
+    document.querySelectorAll('#simple-customize-panel input[data-widget]').forEach((cb) => {
+      cb.checked = Boolean(prefs.simpleWidgets[cb.dataset.widget]);
+    });
+    $('pref-default-simple').checked = Boolean(prefs.defaultToSimple);
+    $('credit-rate-input-simple').value = String(prefs.creditPricePer1k);
+  }
+
+  function renderSimple() {
+    const convPayload = state.convData;
+    const overview = state.overview;
+    const conv = convPayload?.conversation || null;
+    const w = prefs.simpleWidgets;
+
+    if (convPayload) {
+      syncConversationPicker($('simple-conv-picker'), $('simple-pin-wrap'), $('simple-pin-active'), convPayload);
+      renderConvMetaRow($('simple-meta-row'), conv, 'simple-open-selected-conv');
+    }
+
+    // 1. Context & Compaction Gauge
+    const ctxEl = $('sw-contextGauge');
+    if (w.contextGauge) {
+      ctxEl.innerHTML = conv
+        ? `<div class="card context-card">${renderContextGaugeHtml(conv, { showBreakdown: false })}</div>`
+        : '<div class="card empty-state muted-text">Select or open a conversation to see its context window.</div>';
+    } else {
+      ctxEl.innerHTML = '';
+    }
+
+    // 2. Active Chat Token Totals
+    const tokEl = $('sw-tokenSummary');
+    if (w.tokenSummary && conv) {
+      tokEl.innerHTML = `
+        <div class="kpi-grid kpi-2x2">
+          <div class="kpi-card">
+            <div class="kpi-label"><span>Chat Total Tokens</span>${infoTip('All tokens processed across every turn in the selected chat.')}</div>
+            <div class="kpi-value">${esc(fmtTokens(conv.totalTokens))}</div>
+            <div class="kpi-sub">${esc(`${conv.turnCount} turns · In: ${fmtTokens(conv.totalInputTokens)}`)}</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label"><span>Cache Hit &amp; Output</span>${infoTip('Prompt cache hit rate and total output tokens generated in this chat.')}</div>
+            <div class="kpi-value">${esc(fmtPct(conv.cacheHitRate))}</div>
+            <div class="kpi-sub">${esc(`Out: ${fmtTokens(conv.totalOutputTokens)} (${fmtTokens(conv.totalThinkingTokens)} think)`)}</div>
+          </div>
+        </div>
+      `;
+    } else {
+      tokEl.innerHTML = '';
+    }
+
+    // 3. Model Quotas
+    const quotasEl = $('sw-quotas');
+    if (w.quotas) {
+      const groups = overview?.quota?.groups || [];
+      if (groups.length > 0) {
+        quotasEl.innerHTML = `
+          <div class="section-head" style="margin:4px 0 6px">
+            <div class="head-with-tip">
+              <h2 class="section-title">Model Quotas</h2>
+              ${infoTip('Remaining capacity across your model quota pools.')}
+            </div>
+            <span class="muted-text">${overview ? `Updated ${fmtRelativeTime(overview.generatedAt)}` : ''}</span>
+          </div>
+          ${renderQuotaLegendHtml()}
+          <div class="quota-groups">
+            ${groups.map((g) => `
+              <div class="card quota-group-card">
+                <div class="quota-group-title">${esc(g.displayName)}</div>
+                ${(g.buckets || []).map(renderBucketRow).join('')}
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } else {
+        quotasEl.innerHTML = '<div class="card empty-state muted-text">Loading model quotas…</div>';
+      }
+    } else {
+      quotasEl.innerHTML = '';
+    }
+
+    // 4. AI Credits & Cost Snapshot
+    const creditsEl = $('sw-credits');
+    if (w.credits) {
+      const cs = convPayload?.creditsStatus || overview?.creditsStatus;
+      creditsEl.innerHTML = `
+        <div class="section-head" style="margin:4px 0 6px">
+          <div class="head-with-tip">
+            <h2 class="section-title">AI Credits &amp; Cost</h2>
+            ${infoTip('Available AI credits and credit/API cost breakdown for the selected chat.')}
+          </div>
+        </div>
+        <div class="card credits-card">
+          ${renderCreditsAnalysisHtml({
+            creditsStatus: cs,
+            creditsUsed: conv?.totalCreditsUsed || 0,
+            creditBilledTurns: conv?.creditBilledTurns || 0,
+            quotaCoveredTurns: conv?.quotaCoveredTurns || 0,
+            estApiCostUsd: conv?.estApiCostUsd || 0,
+            estCacheSavingsUsd: conv?.estCacheSavingsUsd || 0,
+            scopeLabel: conv ? 'This Chat' : 'Selected',
+          })}
+        </div>
+      `;
+    } else {
+      creditsEl.innerHTML = '';
+    }
+
+    // 5. Context Breakdown
+    const bdEl = $('sw-breakdown');
+    if (w.breakdown && conv?.tokenBreakdown?.groups?.length) {
+      bdEl.innerHTML = `<div class="card context-card">${renderBreakdownHtml(conv)}</div>`;
+    } else {
+      bdEl.innerHTML = '';
+    }
+
+    // 6. Top Models Used
+    const modelsEl = $('sw-topModels');
+    if (w.topModels && overview?.modelUsage?.length) {
+      const top = overview.modelUsage.slice(0, 4);
+      modelsEl.innerHTML = `
+        <div class="section-head" style="margin:4px 0 6px"><h2 class="section-title">Top Models Used</h2></div>
+        <div class="card stack-list">
+          ${top.map((m) => `
+            <div class="list-row">
+              <div class="row-top">
+                <span class="row-title">${esc(m.displayName)}</span>
+                <span class="pill accent">${esc(fmtTokens(m.totalTokens))}</span>
+              </div>
+              <div class="row-metrics">
+                <span><strong>${esc(m.turnCount)}</strong> turns</span>
+                <span>Cache <strong>${esc(fmtPct(m.cacheHitRate))}</strong></span>
+                ${m.creditsUsed > 0 ? `<span>⚡ <strong>${esc(fmtNum(m.creditsUsed))}</strong> cr</span>` : ''}
+                <span>~<strong>${esc(fmtUsd(m.estApiCostUsd))}</strong></span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    } else {
+      modelsEl.innerHTML = '';
+    }
+
+    // 7. Recent Conversations
+    const recentEl = $('sw-recentChats');
+    if (w.recentChats && overview?.conversations?.length) {
+      const rec = overview.conversations.slice(0, 5);
+      recentEl.innerHTML = `
+        <div class="section-head" style="margin:4px 0 6px"><h2 class="section-title">Recent Conversations</h2></div>
+        <div class="card stack-list">
+          ${rec.map((c) => `
+            <div class="list-row">
+              <div class="row-top">
+                <span class="row-title" title="${esc(c.title)}">${esc(c.title)}</span>
+                <button type="button" class="action-link" data-simple-select="${esc(c.conversationId)}">Focus</button>
+              </div>
+              <div class="row-metrics">
+                <span>Ctx <strong>${esc(fmtTokens(c.contextTokensUsed))}</strong>/${esc(fmtTokens(c.maxContextTokens))}</span>
+                <span>Total <strong>${esc(fmtTokens(c.totalTokens))}</strong></span>
+                <span>${esc(fmtRelativeTime(c.lastModifiedMs))}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      recentEl.querySelectorAll('[data-simple-select]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          state.selectedConvId = btn.dataset.simpleSelect;
+          state.pinActive = false;
+          loadConversation();
+        });
+      });
+    } else {
+      recentEl.innerHTML = '';
+    }
+  }
+
   // ---------- data loading & polling ----------
   async function loadOverview(forceQuota = false) {
     try {
@@ -647,9 +1155,11 @@
       if (forceQuota) qs.set('refresh', '1');
       const data = await getJson(`/api/overview?${qs.toString()}`);
       state.overview = data;
+      state.lastOverviewFetchMs = Date.now();
       setError('');
       setLiveOk(true);
-      renderOverview();
+      if (state.mode === 'overview') renderOverview();
+      else if (state.mode === 'simple') renderSimple();
     } catch (err) {
       setLiveOk(false);
       setError(`Failed to load usage overview: ${err.message}`);
@@ -670,11 +1180,20 @@
       }
       setError('');
       setLiveOk(true);
-      renderConversation();
+      if (state.mode === 'conversation') renderConversation();
+      else if (state.mode === 'simple') renderSimple();
     } catch (err) {
       setLiveOk(false);
       setError(`Failed to load conversation usage: ${err.message}`);
     }
+  }
+
+  async function loadSimple(forceQuota = false) {
+    const tasks = [loadConversation()];
+    if (forceQuota || !state.overview || Date.now() - state.lastOverviewFetchMs >= POLL_OVERVIEW_MS) {
+      tasks.push(loadOverview(forceQuota));
+    }
+    await Promise.all(tasks);
   }
 
   function schedulePoll() {
@@ -683,30 +1202,43 @@
     state.timer = setInterval(() => {
       if (document.hidden) return;
       if (state.mode === 'overview') loadOverview(false);
-      else loadConversation();
+      else if (state.mode === 'conversation') loadConversation();
+      else loadSimple(false);
     }, interval);
   }
 
   function switchMode(mode) {
     state.mode = mode;
+    $('tab-simple').classList.toggle('active', mode === 'simple');
+    $('tab-simple').setAttribute('aria-selected', String(mode === 'simple'));
     $('tab-overview').classList.toggle('active', mode === 'overview');
     $('tab-overview').setAttribute('aria-selected', String(mode === 'overview'));
     $('tab-conversation').classList.toggle('active', mode === 'conversation');
     $('tab-conversation').setAttribute('aria-selected', String(mode === 'conversation'));
+
+    $('view-simple').classList.toggle('hidden', mode !== 'simple');
     $('view-overview').classList.toggle('hidden', mode !== 'overview');
     $('view-conversation').classList.toggle('hidden', mode !== 'conversation');
+
     if (mode === 'overview') loadOverview(false);
-    else loadConversation();
+    else if (mode === 'conversation') loadConversation();
+    else {
+      syncCustomizePanelInputs();
+      renderSimple();
+      loadSimple(false);
+    }
     schedulePoll();
   }
 
   // ---------- event wiring ----------
+  $('tab-simple').addEventListener('click', () => switchMode('simple'));
   $('tab-overview').addEventListener('click', () => switchMode('overview'));
   $('tab-conversation').addEventListener('click', () => switchMode('conversation'));
 
   $('refresh-btn').addEventListener('click', () => {
     if (state.mode === 'overview') loadOverview(true);
-    else loadConversation();
+    else if (state.mode === 'conversation') loadConversation();
+    else loadSimple(true);
   });
 
   document.querySelectorAll('.seg-btn[data-range]').forEach((btn) => {
@@ -729,29 +1261,55 @@
     if (state.overview) renderConversationsList(state.overview.conversations || []);
   });
 
-  $('conv-picker').addEventListener('change', (e) => {
+  function onPickerChange(e) {
     state.selectedConvId = e.target.value;
     state.pinActive = Boolean(window.sidecar?.conversationId && state.selectedConvId === window.sidecar.conversationId);
     loadConversation();
-  });
+  }
+  $('conv-picker').addEventListener('change', onPickerChange);
+  $('simple-conv-picker').addEventListener('change', onPickerChange);
 
-  $('pin-active').addEventListener('change', (e) => {
+  function onPinChange(e) {
     state.pinActive = e.target.checked;
     if (state.pinActive && window.sidecar?.conversationId) {
       state.selectedConvId = window.sidecar.conversationId;
       loadConversation();
     }
-  });
+  }
+  $('pin-active').addEventListener('change', onPinChange);
+  $('simple-pin-active').addEventListener('change', onPinChange);
 
   $('turn-order-btn').addEventListener('click', () => {
     state.turnsNewestFirst = !state.turnsNewestFirst;
     renderConversation();
   });
 
+  $('simple-customize-btn').addEventListener('click', () => {
+    state.customizeOpen = !state.customizeOpen;
+    $('simple-customize-panel').classList.toggle('hidden', !state.customizeOpen);
+    $('simple-customize-btn').setAttribute('aria-expanded', String(state.customizeOpen));
+  });
+
+  document.querySelectorAll('#simple-customize-panel input[data-widget]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      prefs.simpleWidgets[cb.dataset.widget] = cb.checked;
+      savePrefs();
+      renderSimple();
+    });
+  });
+
+  $('pref-default-simple').addEventListener('change', (e) => {
+    prefs.defaultToSimple = e.target.checked;
+    savePrefs();
+  });
+
+  wireRateInput('credit-rate-input-simple');
+
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       if (state.mode === 'overview') loadOverview(false);
-      else loadConversation();
+      else if (state.mode === 'conversation') loadConversation();
+      else loadSimple(false);
     }
   });
 

@@ -34,6 +34,9 @@
       </div>
 
       <nav class="mode-tabs" role="tablist" aria-label="Dashboard views">
+        <button id="tab-simple" type="button" role="tab" class="mode-tab" data-mode="simple" aria-selected="false">
+          Simple
+        </button>
         <button id="tab-overview" type="button" role="tab" class="mode-tab" data-mode="overview" aria-selected="true">
           Models &amp; Quotas
         </button>
@@ -46,17 +49,79 @@
     <main class="content">
       <div id="error-banner" class="error-banner hidden" role="alert"></div>
 
+      <!-- View 0: Simple Customizable View -->
+      <section id="view-simple" class="view-pane hidden" aria-labelledby="tab-simple">
+        <div class="conv-header card">
+          <div class="conv-header-top">
+            <select id="simple-conv-picker" class="select conv-picker" aria-label="Select conversation"></select>
+            <div class="simple-actions">
+              <label id="simple-pin-wrap" class="pin-toggle hidden" title="Automatically follow whichever conversation is open">
+                <input id="simple-pin-active" type="checkbox" checked>
+                <span>Follow open chat</span>
+              </label>
+              <button id="simple-customize-btn" type="button" class="ghost-btn sm" aria-expanded="false" aria-controls="simple-customize-panel">
+                Customize
+              </button>
+            </div>
+          </div>
+          <div id="simple-meta-row" class="conv-meta-row"></div>
+        </div>
+
+        <div id="simple-customize-panel" class="card customize-panel hidden">
+          <div class="customize-head">
+            <span class="card-label">Customize Simple View</span>
+            <span class="muted-text">Saved automatically</span>
+          </div>
+          <div class="widget-grid">
+            <label class="check-row"><input type="checkbox" data-widget="contextGauge"><span>Context &amp; Compaction Gauge</span></label>
+            <label class="check-row"><input type="checkbox" data-widget="tokenSummary"><span>Active Chat Token Totals</span></label>
+            <label class="check-row"><input type="checkbox" data-widget="quotas"><span>Model Quotas</span></label>
+            <label class="check-row"><input type="checkbox" data-widget="credits"><span>AI Credits &amp; Cost Snapshot</span></label>
+            <label class="check-row"><input type="checkbox" data-widget="breakdown"><span>Context Breakdown (System / Tools / Chat)</span></label>
+            <label class="check-row"><input type="checkbox" data-widget="topModels"><span>Top Models Used</span></label>
+            <label class="check-row"><input type="checkbox" data-widget="recentChats"><span>Recent Conversations</span></label>
+          </div>
+          <div class="customize-prefs">
+            <label class="check-row">
+              <input id="pref-default-simple" type="checkbox">
+              <span>Open Simple tab by default</span>
+            </label>
+            <label class="rate-control">
+              <span class="muted-text">Credit value ($ / 1K credits):</span>
+              <input id="credit-rate-input-simple" type="number" step="0.5" min="0" class="input sm rate-input" value="10">
+            </label>
+          </div>
+        </div>
+
+        <div id="simple-widgets" class="simple-widgets">
+          <div id="sw-contextGauge" class="simple-widget"></div>
+          <div id="sw-tokenSummary" class="simple-widget"></div>
+          <div id="sw-quotas" class="simple-widget"></div>
+          <div id="sw-credits" class="simple-widget"></div>
+          <div id="sw-breakdown" class="simple-widget"></div>
+          <div id="sw-topModels" class="simple-widget"></div>
+          <div id="sw-recentChats" class="simple-widget"></div>
+        </div>
+      </section>
+
       <!-- View 1: Model Usage & Quotas (Sidebar default) -->
       <section id="view-overview" class="view-pane" aria-labelledby="tab-overview">
         <div class="section-head">
-          <h2 class="section-title">Model Quotas</h2>
+          <div class="head-with-tip">
+            <h2 class="section-title">Model Quotas</h2>
+            <button type="button" class="info-btn" data-tip="Remaining request/compute capacity in each Antigravity quota pool. Quota resets automatically on the displayed schedule." aria-label="About Model Quotas">i</button>
+          </div>
           <span id="quota-updated" class="muted-text"></span>
         </div>
+        <div id="quota-legend"></div>
         <div id="quota-groups" class="quota-groups"></div>
         <p id="quota-note" class="quota-note hidden"></p>
 
         <div class="section-head with-controls">
-          <h2 class="section-title">Token Usage Summary</h2>
+          <div class="head-with-tip">
+            <h2 class="section-title">Token Usage Summary</h2>
+            <button type="button" class="info-btn" data-tip="Cumulative tokens processed across all scanned conversations in the selected time range." aria-label="About Token Usage Summary">i</button>
+          </div>
           <div class="segmented" role="group" aria-label="Time range">
             <button type="button" class="seg-btn active" data-range="all">All Time</button>
             <button type="button" class="seg-btn" data-range="7d">7d</button>
@@ -66,13 +131,28 @@
         <div id="global-kpis" class="kpi-grid"></div>
 
         <div class="section-head">
-          <h2 class="section-title">Usage by Model</h2>
+          <div class="head-with-tip">
+            <h2 class="section-title">AI Credits &amp; Cost Analysis</h2>
+            <button type="button" class="info-btn" data-tip="Compares actual Google AI credits spent (when quota is exhausted or credit-billed turns run) against estimated pay-as-you-go API token costs." aria-label="About AI Credits and Cost Analysis">i</button>
+          </div>
+        </div>
+        <div id="overview-credits-card" class="card credits-card"></div>
+
+        <div class="section-head">
+          <div class="head-with-tip">
+            <h2 class="section-title">Usage by Model</h2>
+            <button type="button" class="info-btn" data-tip="Total tokens, turns, cache hit rate, AI credits, and estimated API value grouped by each Antigravity model used." aria-label="About Usage by Model">i</button>
+          </div>
           <span id="model-usage-count" class="muted-text"></span>
         </div>
+        <div id="model-token-legend"></div>
         <div id="model-usage-list" class="card stack-list"></div>
 
         <div class="section-head with-controls">
-          <h2 class="section-title">Conversations</h2>
+          <div class="head-with-tip">
+            <h2 class="section-title">Conversations</h2>
+            <button type="button" class="info-btn" data-tip="Per-chat token totals, AI credits spent, and latest context window fullness. Click Inspect to open a chat's full breakdown." aria-label="About Conversations">i</button>
+          </div>
           <div class="conv-controls">
             <input id="conv-search" type="search" class="input sm" placeholder="Search conversations…" aria-label="Search conversations">
             <select id="conv-sort" class="select sm" aria-label="Sort conversations">
@@ -113,32 +193,35 @@
 
         <div id="conv-body" class="conv-body hidden">
           <!-- Context Window Gauge -->
-          <div class="card context-card">
-            <div class="card-head">
-              <div>
-                <div class="card-label">Context Window</div>
-                <div id="ctx-headline" class="ctx-headline"></div>
-              </div>
-              <div id="ctx-pct-badge" class="pct-badge"></div>
-            </div>
-            <div id="ctx-bar" class="ctx-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
-            <div id="ctx-legend" class="ctx-legend"></div>
-            <div id="ctx-truncation" class="truncation-alert hidden"></div>
-            <div id="ctx-breakdown" class="breakdown-wrap"></div>
-          </div>
+          <div id="conv-context-card" class="card context-card"></div>
 
           <!-- Cumulative KPI Grid (2x2) -->
           <div id="conv-kpis" class="kpi-grid kpi-2x2"></div>
 
+          <!-- Conversation AI Credits & Cost Analysis -->
+          <div class="section-head">
+            <div class="head-with-tip">
+              <h2 class="section-title">AI Credits &amp; Cost Analysis</h2>
+              <button type="button" class="info-btn" data-tip="Actual Google One AI credits consumed in this conversation vs. what the same tokens would cost at standard pay-as-you-go API rates." aria-label="About Conversation Credits and Cost">i</button>
+            </div>
+          </div>
+          <div id="conv-credits-card" class="card credits-card"></div>
+
           <!-- Models Used in Conversation -->
           <div class="section-head">
-            <h2 class="section-title">Models in This Conversation</h2>
+            <div class="head-with-tip">
+              <h2 class="section-title">Models in This Conversation</h2>
+              <button type="button" class="info-btn" data-tip="Breaks down usage across models used inside this chat (for example, an Orchestrator planning model and an Execution model)." aria-label="About Models in Conversation">i</button>
+            </div>
           </div>
           <div id="conv-models" class="card stack-list"></div>
 
           <!-- Turn-by-Turn Chart & Timeline -->
           <div class="section-head with-controls">
-            <h2 class="section-title">Turn-by-Turn Timeline</h2>
+            <div class="head-with-tip">
+              <h2 class="section-title">Turn-by-Turn Timeline</h2>
+              <button type="button" class="info-btn" data-tip="Each bar and row represents one LLM generation step (a turn) in this conversation. Because the full conversation prefix is sent on every model call, bars normally grow step-by-step—purple shows cached prefix reused, blue shows new uncached input, and green shows the model's output. Drops happen when the context is compacted." aria-label="About Turn-by-Turn Timeline">i</button>
+            </div>
             <button id="turn-order-btn" type="button" class="ghost-btn sm">Newest first</button>
           </div>
           <div id="turn-chart-card" class="card chart-card"></div>
@@ -148,6 +231,7 @@
     </main>
   </div>
 
+  <div id="floating-tooltip" class="floating-tooltip hidden" role="tooltip"></div>
   <script src="/app.js"></script>
 </body>
 </html>

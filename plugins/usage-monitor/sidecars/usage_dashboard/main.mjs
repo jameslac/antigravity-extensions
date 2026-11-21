@@ -21,6 +21,7 @@ const MAX_OVERVIEW_CONVERSATIONS = 50;
 const RUNNING_CACHE_TTL_MS = 2500;
 const IDLE_CACHE_TTL_MS = 60_000;
 const MODEL_CATALOG_TTL_MS = 30_000;
+const USER_STATUS_TTL_MS = 15_000;
 
 const STATIC_ASSETS = {
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
@@ -542,6 +543,74 @@ function normalizeQuota(quotaRes, catalogList) {
 }
 
 // ---------------------------------------------------------------------------
+// AI Credits status & API cost estimation
+// ---------------------------------------------------------------------------
+
+let userStatusCache = { ts: 0, data: null };
+
+async function getUserCreditsStatus(force = false) {
+  const now = Date.now();
+  if (!force && userStatusCache.data && now - userStatusCache.ts < USER_STATUS_TTL_MS) {
+    return userStatusCache.data;
+  }
+  const res = await lsRpc('GetUserStatus', {});
+  const us = res?.userStatus || null;
+  const availableCredits = Array.isArray(us?.userTier?.availableCredits)
+    ? us.userTier.availableCredits.map((c) => ({
+        creditType: c.creditType || 'GOOGLE_ONE_AI',
+        creditAmount: toNum(c.creditAmount),
+        minimumCreditAmountForUsage: toNum(c.minimumCreditAmountForUsage),
+      }))
+    : [];
+  const totalAvailableCredits = availableCredits.reduce((acc, c) => acc + c.creditAmount, 0);
+  const data = {
+    planName: us?.userTier?.name || us?.planStatus?.planInfo?.planName || '',
+    tierId: us?.userTier?.id || '',
+    availableCredits,
+    totalAvailableCredits,
+    availablePromptCredits: toNum(us?.planStatus?.availablePromptCredits),
+    availableFlowCredits: toNum(us?.planStatus?.availableFlowCredits),
+  };
+  userStatusCache = { ts: now, data };
+  return data;
+}
+
+const API_RATE_TABLE = [
+  { match: /opus/, family: 'Claude Opus', inputPerM: 15.0, cacheReadPerM: 1.5, outputPerM: 75.0 },
+  { match: /sonnet/, family: 'Claude Sonnet', inputPerM: 3.0, cacheReadPerM: 0.3, outputPerM: 15.0 },
+  { match: /flash/, family: 'Gemini Flash', inputPerM: 0.3, cacheReadPerM: 0.03, outputPerM: 2.5 },
+  { match: /gpt-oss|gpt/, family: 'GPT-OSS', inputPerM: 0.5, cacheReadPerM: 0.05, outputPerM: 2.0 },
+];
+
+function resolveApiRates(modelId, displayName, contextTokens) {
+  const key = `${modelId || ''} ${displayName || ''}`.toLowerCase();
+  for (const row of API_RATE_TABLE) {
+    if (row.match.test(key)) return row;
+  }
+  if (contextTokens > 200_000) {
+    return { family: 'Gemini Pro-tier (>200K)', inputPerM: 2.5, cacheReadPerM: 0.25, outputPerM: 15.0 };
+  }
+  return { family: 'Gemini Pro-tier', inputPerM: 1.25, cacheReadPerM: 0.125, outputPerM: 10.0 };
+}
+
+function estimateTurnApiCost(modelId, displayName, { inputTokens, cacheReadTokens, outputTokens, contextTokens }) {
+  const rates = resolveApiRates(modelId, displayName, contextTokens);
+  const estApiCostUsd =
+    (inputTokens * rates.inputPerM +
+      cacheReadTokens * rates.cacheReadPerM +
+      outputTokens * rates.outputPerM) /
+    1_000_000;
+  const estWithoutCacheUsd =
+    ((inputTokens + cacheReadTokens) * rates.inputPerM + outputTokens * rates.outputPerM) /
+    1_000_000;
+  return {
+    rateFamily: rates.family,
+    estApiCostUsd,
+    estCacheSavingsUsd: Math.max(0, estWithoutCacheUsd - estApiCostUsd),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Conversation stats computation & caching
 // ---------------------------------------------------------------------------
 
@@ -633,6 +702,11 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
   let ttftCount = 0;
   let totalStreamingMs = 0;
   let totalRetries = 0;
+  let totalCreditsUsed = 0;
+  let creditBilledTurns = 0;
+  let quotaCoveredTurns = 0;
+  let estApiCostUsd = 0;
+  let estCacheSavingsUsd = 0;
 
   let latestContextUsed = 0;
   let latestMaxContext = 0;
@@ -668,6 +742,24 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
       const streamingMs = parseDurationMs(cm.streamingDuration);
       const retries = toNum(cm.retries);
 
+      const consumedList = Array.isArray(cm.consumedCredits) ? cm.consumedCredits : [];
+      let creditsUsed = 0;
+      const creditTypeSet = new Set();
+      for (const c of consumedList) {
+        const amt = toNum(c?.creditAmount);
+        if (amt > 0) {
+          creditsUsed += amt;
+          if (c?.creditType) creditTypeSet.add(c.creditType);
+        }
+      }
+      const creditTypes = [...creditTypeSet];
+      const costEst = estimateTurnApiCost(mInfo.modelId, mInfo.displayName, {
+        inputTokens,
+        cacheReadTokens,
+        outputTokens,
+        contextTokens,
+      });
+
       // Find step timestamp & tool calls from transcript when available.
       let timestamp = cm.chatStartMetadata?.createdAt || '';
       const tools = [];
@@ -702,6 +794,11 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
       }
       totalStreamingMs += streamingMs;
       totalRetries += retries;
+      totalCreditsUsed += creditsUsed;
+      if (creditsUsed > 0) creditBilledTurns += 1;
+      else quotaCoveredTurns += 1;
+      estApiCostUsd += costEst.estApiCostUsd;
+      estCacheSavingsUsd += costEst.estCacheSavingsUsd;
 
       latestContextUsed = contextTokens;
       latestMaxContext = maxContext;
@@ -725,6 +822,8 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
         thinkingTokens: 0,
         responseTokens: 0,
         totalTokens: 0,
+        creditsUsed: 0,
+        estApiCostUsd: 0,
       };
       modelAgg.turns += 1;
       modelAgg.inputTokens += inputTokens;
@@ -734,6 +833,8 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
       modelAgg.thinkingTokens += thinkingTokens;
       modelAgg.responseTokens += responseTokens;
       modelAgg.totalTokens += inputTokens + cacheReadTokens + outputTokens;
+      modelAgg.creditsUsed += creditsUsed;
+      modelAgg.estApiCostUsd += costEst.estApiCostUsd;
       modelsMap.set(mInfo.modelId, modelAgg);
 
       turns.push({
@@ -754,6 +855,11 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
         ttftMs,
         streamingMs,
         retries,
+        creditsUsed,
+        creditTypes,
+        estApiCostUsd: costEst.estApiCostUsd,
+        estCacheSavingsUsd: costEst.estCacheSavingsUsd,
+        rateFamily: costEst.rateFamily,
         tools,
       });
     }
@@ -764,10 +870,21 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
       totalCacheReadTokens += s.cacheReadTokens;
       totalOutputTokens += s.outputTokens;
       totalResponseTokens += s.outputTokens;
+      quotaCoveredTurns += 1;
+
+      const contextTokens = s.inputTokens + s.cacheReadTokens;
+      const costEst = estimateTurnApiCost('unknown', 'Model', {
+        inputTokens: s.inputTokens,
+        cacheReadTokens: s.cacheReadTokens,
+        outputTokens: s.outputTokens,
+        contextTokens,
+      });
+      estApiCostUsd += costEst.estApiCostUsd;
+      estCacheSavingsUsd += costEst.estCacheSavingsUsd;
 
       latestUncachedInput = s.inputTokens;
       latestCacheRead = s.cacheReadTokens;
-      latestContextUsed = s.inputTokens + s.cacheReadTokens;
+      latestContextUsed = contextTokens;
       latestMaxContext = 1_000_000;
 
       turns.push({
@@ -783,11 +900,16 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
         outputTokens: s.outputTokens,
         thinkingTokens: 0,
         responseTokens: s.outputTokens,
-        contextTokens: s.inputTokens + s.cacheReadTokens,
+        contextTokens,
         maxContextTokens: 1_000_000,
         ttftMs: 0,
         streamingMs: 0,
         retries: 0,
+        creditsUsed: 0,
+        creditTypes: [],
+        estApiCostUsd: costEst.estApiCostUsd,
+        estCacheSavingsUsd: costEst.estCacheSavingsUsd,
+        rateFamily: costEst.rateFamily,
         tools: s.tools,
       });
     }
@@ -845,6 +967,11 @@ async function buildConversationStats(convId, { summary, diskInfo, modelCatalog,
     avgTtftMs: ttftCount > 0 ? Math.round(totalTtftMs / ttftCount) : 0,
     totalStreamingMs,
     totalRetries,
+    totalCreditsUsed,
+    creditBilledTurns,
+    quotaCoveredTurns,
+    estApiCostUsd,
+    estCacheSavingsUsd,
     modelsUsed,
     turns,
   };
@@ -874,6 +1001,11 @@ function summarizeConversation(conv) {
     totalOutputTokens: conv.totalOutputTokens,
     totalThinkingTokens: conv.totalThinkingTokens,
     cacheHitRate: conv.cacheHitRate,
+    totalCreditsUsed: conv.totalCreditsUsed,
+    creditBilledTurns: conv.creditBilledTurns,
+    quotaCoveredTurns: conv.quotaCoveredTurns,
+    estApiCostUsd: conv.estApiCostUsd,
+    estCacheSavingsUsd: conv.estCacheSavingsUsd,
   };
 }
 
@@ -889,10 +1021,11 @@ function rangeCutoffMs(range) {
 }
 
 async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' } = {}) {
-  const [quotaRes, modelCatalog, trajRes] = await Promise.all([
+  const [quotaRes, modelCatalog, trajRes, creditsStatus] = await Promise.all([
     lsRpc('RetrieveUserQuotaSummary', { forceRefresh: forceRefreshQuota }),
     getModelCatalog(forceRefreshQuota),
     lsRpc('GetAllCascadeTrajectories', { excludeSubtrajectories: false }),
+    getUserCreditsStatus(forceRefreshQuota),
   ]);
 
   const diskConvs = discoverBrainConversations();
@@ -943,6 +1076,11 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
   let totalOutputTokens = 0;
   let totalThinkingTokens = 0;
   let totalResponseTokens = 0;
+  let totalCreditsUsed = 0;
+  let creditBilledTurns = 0;
+  let quotaCoveredTurns = 0;
+  let estApiCostUsd = 0;
+  let estCacheSavingsUsd = 0;
   let activeConversationsInWindow = 0;
 
   const filteredConversations = [];
@@ -963,6 +1101,11 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
     let cOutput = 0;
     let cThinking = 0;
     let cResponse = 0;
+    let cCredits = 0;
+    let cCreditTurns = 0;
+    let cQuotaTurns = 0;
+    let cEstCost = 0;
+    let cEstSavings = 0;
 
     for (const t of turnsInRange) {
       totalTurns += 1;
@@ -972,6 +1115,14 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
       cOutput += t.outputTokens;
       cThinking += t.thinkingTokens;
       cResponse += t.responseTokens;
+      const tCredits = toNum(t.creditsUsed);
+      const tCost = toNum(t.estApiCostUsd);
+      const tSavings = toNum(t.estCacheSavingsUsd);
+      cCredits += tCredits;
+      if (tCredits > 0) cCreditTurns += 1;
+      else cQuotaTurns += 1;
+      cEstCost += tCost;
+      cEstSavings += tSavings;
 
       const mCatalogEntry = modelCatalog.bySlug.get(t.modelId) || modelCatalog.byEnum.get(t.modelId);
       const mKey = t.modelId || t.modelDisplayName;
@@ -989,6 +1140,8 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
         thinkingTokens: 0,
         responseTokens: 0,
         totalTokens: 0,
+        creditsUsed: 0,
+        estApiCostUsd: 0,
         cacheHitRate: 0,
       };
       if (!convSeenModels.has(mKey)) {
@@ -1003,6 +1156,8 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
       mAgg.thinkingTokens += t.thinkingTokens;
       mAgg.responseTokens += t.responseTokens;
       mAgg.totalTokens += t.inputTokens + t.cacheReadTokens + t.outputTokens;
+      mAgg.creditsUsed += tCredits;
+      mAgg.estApiCostUsd += tCost;
       modelAggMap.set(mKey, mAgg);
     }
 
@@ -1012,6 +1167,11 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
     totalOutputTokens += cOutput;
     totalThinkingTokens += cThinking;
     totalResponseTokens += cResponse;
+    totalCreditsUsed += cCredits;
+    creditBilledTurns += cCreditTurns;
+    quotaCoveredTurns += cQuotaTurns;
+    estApiCostUsd += cEstCost;
+    estCacheSavingsUsd += cEstSavings;
 
     if (cutoffMs > 0) {
       const cInCache = cInput + cCacheRead;
@@ -1024,6 +1184,11 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
         totalThinkingTokens: cThinking,
         totalTokens: cInCache + cOutput,
         cacheHitRate: cInCache > 0 ? cCacheRead / cInCache : 0,
+        totalCreditsUsed: cCredits,
+        creditBilledTurns: cCreditTurns,
+        quotaCoveredTurns: cQuotaTurns,
+        estApiCostUsd: cEstCost,
+        estCacheSavingsUsd: cEstSavings,
       });
     } else {
       filteredConversations.push(summarizeConversation(conv));
@@ -1050,11 +1215,17 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
     totalResponseTokens,
     totalTokens: totalInputPlusCache + totalOutputTokens,
     cacheHitRate: totalInputPlusCache > 0 ? totalCacheReadTokens / totalInputPlusCache : 0,
+    totalCreditsUsed,
+    creditBilledTurns,
+    quotaCoveredTurns,
+    estApiCostUsd,
+    estCacheSavingsUsd,
   };
 
   return {
     generatedAt: new Date().toISOString(),
     range,
+    creditsStatus,
     quota: normalizeQuota(quotaRes, modelCatalog.catalogList),
     globalTotals,
     modelUsage,
@@ -1064,9 +1235,10 @@ async function buildOverviewPayload({ forceRefreshQuota = false, range = 'all' }
 }
 
 async function buildConversationPayload(requestedId) {
-  const [modelCatalog, trajRes] = await Promise.all([
+  const [modelCatalog, trajRes, creditsStatus] = await Promise.all([
     getModelCatalog(false),
     lsRpc('GetAllCascadeTrajectories', { excludeSubtrajectories: false }),
+    getUserCreditsStatus(false),
   ]);
 
   const diskConvs = discoverBrainConversations();
@@ -1097,7 +1269,7 @@ async function buildConversationPayload(requestedId) {
   }
 
   if (!convId) {
-    return { conversationId: null, resolvedFrom: 'none', conversation: null, conversations: [] };
+    return { conversationId: null, resolvedFrom: 'none', creditsStatus, conversation: null, conversations: [] };
   }
 
   const conversation = await buildConversationStats(convId, {
@@ -1110,6 +1282,7 @@ async function buildConversationPayload(requestedId) {
   return {
     conversationId: convId,
     resolvedFrom,
+    creditsStatus,
     conversation,
     conversations: list.slice(0, MAX_OVERVIEW_CONVERSATIONS),
   };

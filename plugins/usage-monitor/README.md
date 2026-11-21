@@ -2,8 +2,9 @@
 
 An Antigravity UI plugin that adds:
 
-1. **Sidebar Model Usage Dashboard (`Model Usage`)**: Located in the left-hand sidebar's Plugins section (`SIDECAR_UI_ENTRYPOINT_SIDEBAR`). Shows live Antigravity model quota buckets (`RetrieveUserQuotaSummary`, `GetAvailableModels`, `GetCascadeModelConfigData`), quota reset countdowns, total token usage aggregated by model across conversations, and a searchable/sortable list of conversations by token usage.
-2. **Conversation Context & Token Inspector (`Context & Tokens`)**: Available in the right-hand auxiliary pane (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for each open conversation. Automatically tracks `window.sidecar.conversationId` and shows real-time context window usage (`used / max`, `%`, cached prefix vs. new uncached input, and `tokenBreakdown` sections/tools/messages), cumulative conversation totals (uncached input, cache read + hit rate %, cache write, output + thinking split, latency), per-model breakdown, and a turn-by-turn token timeline.
+1. **Sidebar Model Usage Dashboard (`Model Usage`)**: Located in the left-hand sidebar's Plugins section (`SIDECAR_UI_ENTRYPOINT_SIDEBAR`). Shows live Antigravity model quota buckets (`RetrieveUserQuotaSummary`, `GetAvailableModels`, `GetCascadeModelConfigData`), quota reset countdowns, total token usage aggregated by model across conversations, AI credits & estimated API cost analysis (`GetUserStatus`), color legends, and a searchable/sortable list of conversations by token usage.
+2. **Conversation Context & Token Inspector (`Context & Tokens`)**: Available in the right-hand auxiliary pane (`SIDECAR_UI_ENTRYPOINT_AUX_PANE`) for each open conversation. Automatically tracks `window.sidecar.conversationId` and shows real-time context window usage (`used / max`, `%`, compaction readiness, cached prefix vs. new uncached input, and `tokenBreakdown` sections/tools/messages), cumulative conversation totals, AI credits spent vs. estimated API cost, per-model breakdown, and a turn-by-turn token timeline with hoverable info tooltips.
+3. **Customizable `Simple` Tab**: Switch to the **Simple** tab to pin a streamlined view (context & compaction gauge, token summary, model quotas, AI credits, and optional breakdown/top models/recent chats) and optionally set it as your default tab.
 
 ## Preview
 

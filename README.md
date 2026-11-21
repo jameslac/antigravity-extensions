@@ -6,7 +6,7 @@ A collection of plugins, UI sidecars, skills, and customizations for [Google Ant
 
 | Plugin | Display Name | Description |
 | :--- | :--- | :--- |
-| [`usage-monitor`](./plugins/usage-monitor) | **Model & Token Usage** | Live Antigravity model quota & usage dashboard in the sidebar (`Model Usage`), plus a per-conversation context window & token inspector in the auxiliary pane (`Context & Tokens`). |
+| [`usage-monitor`](./plugins/usage-monitor) | **Model & Token Usage** | Live Antigravity model quota, AI credits & cost analysis, and usage dashboard in the sidebar (`Model Usage`), a customizable `Simple` view, plus a per-conversation context window & token inspector in the auxiliary pane (`Context & Tokens`). |
 
 ### Preview (`usage-monitor`)
 
