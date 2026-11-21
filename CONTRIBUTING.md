@@ -38,13 +38,24 @@ plugins/<plugin-name>/
 
 ## Development Workflow
 
+All changes must be developed on a branch off `origin/main` and submitted via a Pull Request (do not commit or push directly to `main`).
+
 ```bash
 git clone https://github.com/jameslac/antigravity-extensions.git
 cd antigravity-extensions
-git checkout -b feat/my-update
+
+# Always fetch latest origin and branch off origin/main:
+git fetch origin
+git checkout -b feat/my-update origin/main
 
 # Make changes under plugins/<plugin-name>/, then sync to your local Antigravity config:
 ./install.sh <plugin-name>
+
+# Commit your changes, push your branch, and open a PR against main:
+git add <files>
+git commit -m "feat(<plugin-name>): describe your change"
+git push -u origin feat/my-update
+gh pr create --base main
 ```
 
 If you modify a sidecar's `main.mjs` or backend code, note that the Antigravity Language Server reloads sidecars when `sidecar.json` changes (or when toggling the plugin off/on in Customizations).
